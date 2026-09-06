@@ -392,21 +392,8 @@ class HudCanvas(QWidget):
         self._tmr.start(16)
 
     def _load_face(self, path: str):
-        try:
-            from PIL import Image, ImageDraw
-            import io
-            img = Image.open(path).convert("RGBA")
-            sz  = min(img.size)
-            img = img.resize((sz, sz), Image.LANCZOS)
-            mk  = Image.new("L", (sz, sz), 0)
-            ImageDraw.Draw(mk).ellipse((2, 2, sz - 2, sz - 2), fill=255)
-            img.putalpha(mk)
-            buf = io.BytesIO()
-            img.save(buf, format="PNG")
-            px = QPixmap(); px.loadFromData(buf.getvalue())
-            self._face_px = px
-        except Exception:
-            self._face_px = None
+        px = QPixmap(path)
+        self._face_px = px if not px.isNull() else None
 
     def _step(self):
         self._tick += 1
@@ -510,72 +497,48 @@ class HudCanvas(QWidget):
             for y in range(0, H, 48):
                 p.drawPoint(x, y)
 
-        r_face = fw * 0.31
+        energy  = self._energy
 
-        # halo glow
-        for i in range(10):
-            r   = r_face * (1.8 - i * 0.08)
-            frc = 1.0 - i / 10
-            a   = max(0, min(255, int(self._halo * 0.085 * frc)))
-            col = qcol(C.MUTED_C if self.muted else C.PRI, a)
-            p.setPen(QPen(col, 1.5)); p.setBrush(Qt.BrushStyle.NoBrush)
-            p.drawEllipse(QRectF(cx - r, cy - r, r * 2, r * 2))
+        # ── Maroon halo bloom (behind avatar) ───────────────────────────────
+        halo_r = fw * 0.40
+        oc = (200, 0, 50) if self.muted else (109, 0, 26)
+        for gi in range(6, 0, -1):
+            r2  = halo_r * gi / 6
+            frc = gi / 6
+            a_g = max(0, min(255, int(self._halo * 0.9 * frc * min(1.0, energy))))
+            p.setBrush(QBrush(QColor(int(oc[0]*frc), int(oc[1]*frc), int(oc[2]*frc), a_g)))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.drawEllipse(QRectF(cx - r2, cy - r2, r2 * 2, r2 * 2))
 
-        # pulse rings
+        # ── Avatar — large, centered, dominant ──────────────────────────────
+        # Drawn over halo; filaments draw on top of avatar edges.
+        if self._face_px:
+            # Size: 68% of canvas; breathes slightly with energy level
+            base_dim = int(fw * 0.68)
+            scale_f = 0.96 + energy * 0.06
+            fsz = max(80, int(base_dim * scale_f))
+            scaled = self._face_px.scaled(
+                fsz, fsz,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            # State-based opacity: dim when SLEEPING, full when ACTIVE
+            avatar_alpha = max(55, min(220, int(55 + energy * 165)))
+            p.setOpacity(avatar_alpha / 255.0)
+            p.drawPixmap(int(cx - scaled.width() / 2), int(cy - scaled.height() / 2), scaled)
+            p.setOpacity(1.0)
+
+        # ── Subtle pulse rings ───────────────────────────────────────────────
+        p.setBrush(Qt.BrushStyle.NoBrush)
         for pr in self._pulses:
-            a   = max(0, int(230 * (1.0 - pr / (fw * 0.74))))
+            a   = max(0, int(160 * (1.0 - pr / (fw * 0.74)) * min(1.0, energy)))
             col = qcol(C.MUTED_C if self.muted else C.PRI, a)
-            p.setPen(QPen(col, 1.5)); p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(col, 1.2))
             p.drawEllipse(QRectF(cx - pr, cy - pr, pr * 2, pr * 2))
 
-        # spinning arc rings
-        for idx, (r_frac, w_r, arc_l, gap) in enumerate(
-            [(0.48, 3, 115, 78), (0.40, 2, 78, 55), (0.32, 1, 56, 40)]
-        ):
-            ring_r = fw * r_frac
-            base   = self._rings[idx]
-            a_val  = max(0, min(255, int(self._halo * (1.0 - idx * 0.18))))
-            col    = qcol(C.MUTED_C if self.muted else C.PRI, a_val)
-            p.setPen(QPen(col, w_r)); p.setBrush(Qt.BrushStyle.NoBrush)
-            angle = base
-            rect  = QRectF(cx - ring_r, cy - ring_r, ring_r * 2, ring_r * 2)
-            while angle < base + 360:
-                p.drawArc(rect, int(angle * 16), int(arc_l * 16))
-                angle += arc_l + gap
-
-        # scanners
-        sr = fw * 0.50
-        sa = min(255, int(self._halo * 1.5))
-        ex = 75 if self.speaking else 44
-        p.setPen(QPen(qcol(C.MUTED_C if self.muted else C.PRI, sa), 2.5))
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        srect = QRectF(cx - sr, cy - sr, sr * 2, sr * 2)
-        p.drawArc(srect, int(self._scan * 16), int(ex * 16))
-        p.setPen(QPen(qcol(C.ACC, sa // 2), 1.5))
-        p.drawArc(srect, int(self._scan2 * 16), int(ex * 16))
-
-        # tick marks
-        t_out, t_in = fw * 0.497, fw * 0.474
-        p.setPen(QPen(qcol(C.PRI, 140), 1))
-        for deg in range(0, 360, 10):
-            rad = math.radians(deg)
-            inn = t_in if deg % 30 == 0 else t_in + 6
-            p.drawLine(
-                QPointF(cx + t_out * math.cos(rad), cy - t_out * math.sin(rad)),
-                QPointF(cx + inn  * math.cos(rad), cy - inn  * math.sin(rad)),
-            )
-
-        # crosshair
-        ch_r, gap_h = fw * 0.51, fw * 0.16
-        p.setPen(QPen(qcol(C.PRI, int(self._halo * 0.5)), 1))
-        p.drawLine(QPointF(cx - ch_r, cy), QPointF(cx - gap_h, cy))
-        p.drawLine(QPointF(cx + gap_h, cy), QPointF(cx + ch_r, cy))
-        p.drawLine(QPointF(cx, cy - ch_r), QPointF(cx, cy - gap_h))
-        p.drawLine(QPointF(cx, cy + gap_h), QPointF(cx, cy + ch_r))
-
-        # corner brackets
+        # corner brackets — futuristic frame
         bl = 24
-        bc = qcol(C.PRI, 210)
+        bc = qcol(C.PRI, min(255, int(160 * energy + 50)))
         hl, hr = cx - fw // 2, cx + fw // 2
         ht, hb = cy - fw // 2, cy + fw // 2
         p.setPen(QPen(bc, 2))
@@ -583,25 +546,24 @@ class HudCanvas(QWidget):
             p.drawLine(QPointF(bx, by), QPointF(bx + dx * bl, by))
             p.drawLine(QPointF(bx, by), QPointF(bx, by + dy * bl))
 
-        # ── Energy filaments ────────────────────────────────────────────────
-        energy  = self._energy
-        core_r  = fw * 0.22 * self._scale
+        # ── Energy filaments — animate around/over avatar edges ─────────────
+        core_r  = fw * 0.24 * self._scale
         p.setBrush(Qt.BrushStyle.NoBrush)
         for angle, lf, phase, width, bright in zip(
                 self._fil_angles, self._fil_lens, self._fil_phases,
                 self._fil_widths, self._fil_bright):
-            length = fw * 0.46 * lf * min(1.2, energy)
-            if length < fw * 0.04:
+            length = fw * 0.40 * lf * min(1.2, energy)
+            if length < fw * 0.03:
                 continue
             perp   = angle + math.pi / 2
-            wiggle = math.sin(phase) * fw * 0.10 * energy
-            sx = cx + math.cos(angle) * core_r * 0.88
-            sy = cy + math.sin(angle) * core_r * 0.88
+            wiggle = math.sin(phase) * fw * 0.09 * energy
+            sx = cx + math.cos(angle) * core_r * 0.85
+            sy = cy + math.sin(angle) * core_r * 0.85
             ex = cx + math.cos(angle) * (core_r + length)
             ey = cy + math.sin(angle) * (core_r + length)
             mx = sx + math.cos(angle) * length * 0.5 + math.cos(perp) * wiggle
             my = sy + math.sin(angle) * length * 0.5 + math.sin(perp) * wiggle
-            a_val = int(bright * min(1.0, energy) * 210)
+            a_val = int(bright * min(1.0, energy) * 200)
             if a_val < 8:
                 continue
             use_col = C.ACC if (energy > 0.88 and self.speaking) else C.PRI
@@ -610,41 +572,23 @@ class HudCanvas(QWidget):
             fil_path.quadTo(mx, my, ex, ey)
             p.strokePath(fil_path, QPen(qcol(use_col, a_val), width * (0.4 + energy * 0.6)))
 
-        # ── Central core glow ───────────────────────────────────────────────
-        oc = (200, 0, 50) if self.muted else (109, 0, 26)
-        for gi in range(7, 0, -1):
-            r2  = core_r * gi / 7
-            frc = gi / 7
-            a_g = max(0, min(255, int(self._halo * 1.4 * frc * min(1.0, energy))))
-            p.setBrush(QBrush(QColor(int(oc[0]*frc), int(oc[1]*frc), int(oc[2]*frc), a_g)))
-            p.setPen(Qt.PenStyle.NoPen)
-            p.drawEllipse(QRectF(cx - r2, cy - r2, r2 * 2, r2 * 2))
-
-        # ── Face or SHADOW name ─────────────────────────────────────────────
-        if self._face_px:
-            fsz    = int(fw * 0.50 * self._scale)
-            scaled = self._face_px.scaled(
-                fsz, fsz,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            p.drawPixmap(int(cx - fsz / 2), int(cy - fsz / 2), scaled)
-        else:
-            # SHADOW name — white text with layered maroon glow
-            name = self._assistant_name
-            t_a  = min(255, int(max(60, self._halo * 3.2)))
-            for sz, a_mul in [(28, 0.07), (23, 0.13), (18, 0.26), (15, 0.55), (13, 1.0)]:
-                a   = min(255, int(t_a * a_mul))
-                col = qcol(C.PRI if a_mul < 0.8 else C.WHITE, a)
-                p.setFont(QFont("Courier New", sz, QFont.Weight.Bold))
-                p.setPen(QPen(col, 1))
-                p.drawText(QRectF(cx - 90, cy - 16, 180, 32),
-                           Qt.AlignmentFlag.AlignCenter, name)
+        # ── SHADOW name — always white, above avatar ────────────────────────
+        name = self._assistant_name
+        # Avatar top edge ≈ cy - fw*0.34; place name at cy - fw*0.43 so
+        # it is clearly above the avatar without overlapping gesture HUD.
+        name_y = cy - fw * 0.43
+        for sz, a_mul in [(26, 0.06), (21, 0.12), (17, 0.22), (14, 0.5), (12, 1.0)]:
+            a   = min(255, max(180, int(255 * a_mul)))
+            col = qcol(C.PRI if a_mul < 0.7 else C.WHITE, a)
+            p.setFont(QFont("Courier New", sz, QFont.Weight.Bold))
+            p.setPen(QPen(col, 1))
+            p.drawText(QRectF(cx - 120, name_y - 18, 240, 36),
+                       Qt.AlignmentFlag.AlignCenter, name)
 
         # ── Gesture HUD notification ────────────────────────────────────────
         if self._gesture_alpha > 0.01 and self._gesture_txt:
             ga      = int(self._gesture_alpha * 230)
-            n_y     = cy - fw * 0.44
+            n_y     = cy - fw * 0.50   # above SHADOW name (cy - fw*0.43)
             n_rect  = QRectF(cx - 170, n_y - 3, 340, 30)
             p.setBrush(QBrush(qcol("#080002", min(255, int(ga * 0.88)))))
             p.setPen(QPen(qcol(C.PRI, ga), 1))

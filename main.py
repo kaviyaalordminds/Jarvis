@@ -1104,9 +1104,15 @@ class SHADOWLive:
                 gesture_detector.set_speaking(SHADOW_speaking)
                 kind = gesture_detector.feed(data)
                 if kind is GestureKind.CLAP:
+                    print("[Gesture] DOUBLE CLAP detected")
+                    print(f"[Gesture] Current state: {self._current_state}")
+                    print("[Gesture] Toggle action: STOP")
                     loop.call_soon_threadsafe(self._request_stop, "DOUBLE_CLAP")
                     self.ui.notify_gesture("◈  DOUBLE CLAP → STOPPING SHADOW")
                 elif kind is GestureKind.SNAP:
+                    print("[Gesture] DOUBLE SNAP detected")
+                    print(f"[Gesture] Current state: {self._current_state}")
+                    print("[Gesture] Toggle action: STOP")
                     loop.call_soon_threadsafe(self._request_stop, "DOUBLE_FINGER_SNAP")
                     self.ui.notify_gesture("◈  DOUBLE SNAP → STOPPING SHADOW")
             if not SHADOW_speaking and not self.ui.muted and not self._phone_active:
@@ -1715,9 +1721,12 @@ class SHADOWLive:
                 self.ui.write_log(f'SYS: "{self._wake_phrase.title()}" detected — waking up.')
             else:
                 source = "DOUBLE_CLAP" if detail is GestureKind.CLAP else "DOUBLE_FINGER_SNAP"
+                gesture_label = "DOUBLE CLAP" if detail is GestureKind.CLAP else "DOUBLE SNAP"
+                print(f"[Gesture] {gesture_label} detected")
+                print(f"[Gesture] Current state: {self._current_state}")
+                print(f"[Gesture] Toggle action: WAKE")
                 self._request_wake(source)
                 self.ui.write_log(f"SYS: {source.replace('_', ' ').title()} detected — waking up.")
-                gesture_label = "DOUBLE CLAP" if detail is GestureKind.CLAP else "DOUBLE SNAP"
                 self.ui.notify_gesture(f"◈  {gesture_label} → WAKING SHADOW")
             self._transition("WAKING")
             return True
@@ -1947,7 +1956,9 @@ class SHADOWLive:
             await asyncio.sleep(delay)
 
 def main():
-    ui = SHADOWUI("face.png")
+    import os as _os
+    _avatar = _os.path.join(_os.path.dirname(__file__), "config", "shadow_avatar.jpg")
+    ui = SHADOWUI(_avatar if _os.path.exists(_avatar) else "face.png")
 
     def runner():
         ui.wait_for_api_key()
