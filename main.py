@@ -1105,8 +1105,10 @@ class SHADOWLive:
                 kind = gesture_detector.feed(data)
                 if kind is GestureKind.CLAP:
                     loop.call_soon_threadsafe(self._request_stop, "DOUBLE_CLAP")
+                    self.ui.notify_gesture("◈  DOUBLE CLAP → STOPPING SHADOW")
                 elif kind is GestureKind.SNAP:
                     loop.call_soon_threadsafe(self._request_stop, "DOUBLE_FINGER_SNAP")
+                    self.ui.notify_gesture("◈  DOUBLE SNAP → STOPPING SHADOW")
             if not SHADOW_speaking and not self.ui.muted and not self._phone_active:
                 loop.call_soon_threadsafe(
                     self.out_queue.put_nowait,
@@ -1715,6 +1717,8 @@ class SHADOWLive:
                 source = "DOUBLE_CLAP" if detail is GestureKind.CLAP else "DOUBLE_FINGER_SNAP"
                 self._request_wake(source)
                 self.ui.write_log(f"SYS: {source.replace('_', ' ').title()} detected — waking up.")
+                gesture_label = "DOUBLE CLAP" if detail is GestureKind.CLAP else "DOUBLE SNAP"
+                self.ui.notify_gesture(f"◈  {gesture_label} → WAKING SHADOW")
             self._transition("WAKING")
             return True
         return False

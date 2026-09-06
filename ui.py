@@ -366,6 +366,27 @@ class HudCanvas(QWidget):
         self._face_px: QPixmap | None = None
         self._load_face(face_path)
 
+        # Energy filament system — 32 animated strands flowing from center outward
+        _N = 32
+        self._fil_phases = [random.uniform(0, 2 * math.pi) for _ in range(_N)]
+        self._fil_angles = [(i / _N) * 2 * math.pi + random.uniform(-0.18, 0.18) for i in range(_N)]
+        self._fil_lens   = [random.uniform(0.50, 0.95) for _ in range(_N)]
+        self._fil_speeds = [random.uniform(0.025, 0.085) for _ in range(_N)]
+        self._fil_widths = [random.uniform(0.7, 2.0) for _ in range(_N)]
+        self._fil_bright = [random.uniform(0.30, 1.0) for _ in range(_N)]
+        self._energy     = 0.20   # current energy (0–1+), EMA toward target
+        self._energy_tgt = 0.20
+
+        # Gesture HUD notification
+        self._gesture_txt   = ""
+        self._gesture_alpha = 0.0
+        self._gesture_t     = 0.0
+
+        # Status flags (set externally via set_status_flags)
+        self._wake_online    = True
+        self._gesture_online = True
+        self._ai_connected   = False
+
         self._tmr = QTimer(self)
         self._tmr.timeout.connect(self._step)
         self._tmr.start(16)
@@ -438,6 +459,40 @@ class HudCanvas(QWidget):
         if self._blink_tick >= 38:
             self._blink = not self._blink
             self._blink_tick = 0
+
+        # Energy level EMA — each state maps to a target intensity
+        _E_MAP = {
+            "SLEEPING": 0.18, "WAKING": 0.55, "ACTIVE": 1.0,
+            "LISTENING": 1.0, "PROCESSING": 0.72, "STOPPING": 0.22,
+            "INITIALISING": 0.12, "THINKING": 0.75,
+        }
+        if self.speaking:
+            self._energy_tgt = 1.15
+        elif self.muted:
+            self._energy_tgt = 0.08
+        else:
+            self._energy_tgt = _E_MAP.get(self.state, 0.50)
+        e_spd = 0.04 if self._energy_tgt > self._energy else 0.07
+        self._energy = max(0.0, self._energy + (self._energy_tgt - self._energy) * e_spd)
+
+        # Advance filament phases — faster when more energy
+        spd_mul = max(0.15, self._energy)
+        for i in range(len(self._fil_phases)):
+            self._fil_phases[i] = (self._fil_phases[i] + self._fil_speeds[i] * spd_mul) % (2 * math.pi)
+
+        # Fade gesture notification
+        if self._gesture_alpha > 0:
+            elapsed = time.time() - self._gesture_t
+            if elapsed < 0.4:
+                self._gesture_alpha = min(1.0, elapsed / 0.4)
+            elif elapsed < 2.6:
+                self._gesture_alpha = 1.0
+            elif elapsed < 3.1:
+                self._gesture_alpha = max(0.0, 1.0 - (elapsed - 2.6) / 0.5)
+            else:
+                self._gesture_alpha = 0.0
+                self._gesture_txt   = ""
+
         self.update()
 
     def paintEvent(self, _):
@@ -528,9 +583,46 @@ class HudCanvas(QWidget):
             p.drawLine(QPointF(bx, by), QPointF(bx + dx * bl, by))
             p.drawLine(QPointF(bx, by), QPointF(bx, by + dy * bl))
 
-        # face
+        # ── Energy filaments ────────────────────────────────────────────────
+        energy  = self._energy
+        core_r  = fw * 0.22 * self._scale
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        for angle, lf, phase, width, bright in zip(
+                self._fil_angles, self._fil_lens, self._fil_phases,
+                self._fil_widths, self._fil_bright):
+            length = fw * 0.46 * lf * min(1.2, energy)
+            if length < fw * 0.04:
+                continue
+            perp   = angle + math.pi / 2
+            wiggle = math.sin(phase) * fw * 0.10 * energy
+            sx = cx + math.cos(angle) * core_r * 0.88
+            sy = cy + math.sin(angle) * core_r * 0.88
+            ex = cx + math.cos(angle) * (core_r + length)
+            ey = cy + math.sin(angle) * (core_r + length)
+            mx = sx + math.cos(angle) * length * 0.5 + math.cos(perp) * wiggle
+            my = sy + math.sin(angle) * length * 0.5 + math.sin(perp) * wiggle
+            a_val = int(bright * min(1.0, energy) * 210)
+            if a_val < 8:
+                continue
+            use_col = C.ACC if (energy > 0.88 and self.speaking) else C.PRI
+            fil_path = QPainterPath()
+            fil_path.moveTo(sx, sy)
+            fil_path.quadTo(mx, my, ex, ey)
+            p.strokePath(fil_path, QPen(qcol(use_col, a_val), width * (0.4 + energy * 0.6)))
+
+        # ── Central core glow ───────────────────────────────────────────────
+        oc = (200, 0, 50) if self.muted else (109, 0, 26)
+        for gi in range(7, 0, -1):
+            r2  = core_r * gi / 7
+            frc = gi / 7
+            a_g = max(0, min(255, int(self._halo * 1.4 * frc * min(1.0, energy))))
+            p.setBrush(QBrush(QColor(int(oc[0]*frc), int(oc[1]*frc), int(oc[2]*frc), a_g)))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.drawEllipse(QRectF(cx - r2, cy - r2, r2 * 2, r2 * 2))
+
+        # ── Face or SHADOW name ─────────────────────────────────────────────
         if self._face_px:
-            fsz    = int(fw * 0.62 * self._scale)
+            fsz    = int(fw * 0.50 * self._scale)
             scaled = self._face_px.scaled(
                 fsz, fsz,
                 Qt.AspectRatioMode.KeepAspectRatio,
@@ -538,19 +630,29 @@ class HudCanvas(QWidget):
             )
             p.drawPixmap(int(cx - fsz / 2), int(cy - fsz / 2), scaled)
         else:
-            orb_r = int(fw * 0.27 * self._scale)
-            oc    = (200, 0, 50) if self.muted else (109, 0, 26)   # SHADOW maroon #6D001A
-            for i in range(8, 0, -1):
-                r2  = int(orb_r * i / 8)
-                frc = i / 8
-                a   = max(0, min(255, int(self._halo * 1.1 * frc)))
-                p.setBrush(QBrush(QColor(int(oc[0]*frc), int(oc[1]*frc), int(oc[2]*frc), a)))
-                p.setPen(Qt.PenStyle.NoPen)
-                p.drawEllipse(QRectF(cx - r2, cy - r2, r2 * 2, r2 * 2))
-            p.setPen(QPen(qcol(C.PRI, min(255, int(self._halo * 2))), 1))
-            p.setFont(QFont("Courier New", 13, QFont.Weight.Bold))
-            p.drawText(QRectF(cx - 80, cy - 14, 160, 28),
-                       Qt.AlignmentFlag.AlignCenter, self._assistant_name)
+            # SHADOW name — white text with layered maroon glow
+            name = self._assistant_name
+            t_a  = min(255, int(max(60, self._halo * 3.2)))
+            for sz, a_mul in [(28, 0.07), (23, 0.13), (18, 0.26), (15, 0.55), (13, 1.0)]:
+                a   = min(255, int(t_a * a_mul))
+                col = qcol(C.PRI if a_mul < 0.8 else C.WHITE, a)
+                p.setFont(QFont("Courier New", sz, QFont.Weight.Bold))
+                p.setPen(QPen(col, 1))
+                p.drawText(QRectF(cx - 90, cy - 16, 180, 32),
+                           Qt.AlignmentFlag.AlignCenter, name)
+
+        # ── Gesture HUD notification ────────────────────────────────────────
+        if self._gesture_alpha > 0.01 and self._gesture_txt:
+            ga      = int(self._gesture_alpha * 230)
+            n_y     = cy - fw * 0.44
+            n_rect  = QRectF(cx - 170, n_y - 3, 340, 30)
+            p.setBrush(QBrush(qcol("#080002", min(255, int(ga * 0.88)))))
+            p.setPen(QPen(qcol(C.PRI, ga), 1))
+            p.drawRoundedRect(n_rect, 6, 6)
+            n_col = C.ACC if ("WAKING" in self._gesture_txt or "STOPPING" in self._gesture_txt) else C.TEXT
+            p.setPen(QPen(qcol(n_col, ga), 1))
+            p.setFont(QFont("Courier New", 9, QFont.Weight.Bold))
+            p.drawText(n_rect, Qt.AlignmentFlag.AlignCenter, self._gesture_txt)
 
         # particles
         for pt in self._particles:
@@ -596,6 +698,18 @@ class HudCanvas(QWidget):
                 hgt = int(3 + 2 * math.sin(self._tick * 0.09 + i * 0.6))
                 cl  = qcol(C.BORDER_B)
             p.fillRect(QRectF(wx0 + i * bw, wy + 20 - hgt, bw - 1, hgt), cl)
+
+    def show_gesture_notification(self, text: str) -> None:
+        """Show a brief animated HUD notification for gesture events (call from main thread)."""
+        self._gesture_txt   = text
+        self._gesture_alpha = 0.001
+        self._gesture_t     = time.time()
+
+    def set_status_flags(self, wake_online: bool, gesture_online: bool, ai_connected: bool) -> None:
+        """Update status indicator flags (must be called from the main thread)."""
+        self._wake_online    = wake_online
+        self._gesture_online = gesture_online
+        self._ai_connected   = ai_connected
 
 class MetricBar(QWidget):
 
@@ -1849,6 +1963,7 @@ class MainWindow(QMainWindow):
     _cam_stream_sig = pyqtSignal(bool)       # True=start live stream, False=stop
     _cam_frame_sig  = pyqtSignal(bytes)      # live camera frame → HUD area
     _clipboard_sig  = pyqtSignal(str)        # clipboard text changed (thread-safe)
+    _gesture_sig    = pyqtSignal(str)        # gesture HUD notification (thread-safe)
 
     def __init__(self, face_path: str):
         super().__init__()
@@ -1991,6 +2106,7 @@ class MainWindow(QMainWindow):
         self._cam_stream_sig.connect(self._on_cam_stream)
         self._cam_frame_sig.connect(self._on_cam_frame)
         self._clipboard_sig.connect(self._show_clipboard_panel)
+        self._gesture_sig.connect(self.hud.show_gesture_notification)
         self._cam_stop = threading.Event()
 
         # Camera preview overlay (child of central widget, positioned in resizeEvent)
@@ -3335,6 +3451,10 @@ class MainWindow(QMainWindow):
         self.hud.state    = state
         self.hud.speaking = (state == "SPEAKING")
 
+    def notify_gesture(self, text: str) -> None:
+        """Thread-safe: show a brief gesture detection notification in the HUD."""
+        self._gesture_sig.emit(text)
+
     def _check_config(self) -> bool:
         if not API_FILE.exists(): return False
         try:
@@ -3476,3 +3596,7 @@ class SHADOWUI:
     def stop_speaking(self):
         if not self.muted:
             self.set_state("LISTENING")
+
+    def notify_gesture(self, text: str) -> None:
+        """Thread-safe: show a gesture detection notification in the HUD overlay."""
+        self._win.notify_gesture(text)
