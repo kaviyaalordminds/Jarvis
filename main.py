@@ -1095,15 +1095,18 @@ class SHADOWLive:
                 loop.call_soon_threadsafe(self._request_stop, "VOICE_STOP_WORD")
 
             gesture_detector = self._active_gesture
+            with self._speaking_lock:
+                SHADOW_speaking = self._is_speaking
             if gesture_detector is not None:
+                # Freeze noise-floor rise during TTS so SHADOW's own speaker
+                # audio can't elevate the floor past the point where claps/snaps
+                # can't clear it — the floor still falls normally when silent.
+                gesture_detector.set_speaking(SHADOW_speaking)
                 kind = gesture_detector.feed(data)
                 if kind is GestureKind.CLAP:
                     loop.call_soon_threadsafe(self._request_stop, "DOUBLE_CLAP")
                 elif kind is GestureKind.SNAP:
                     loop.call_soon_threadsafe(self._request_stop, "DOUBLE_FINGER_SNAP")
-
-            with self._speaking_lock:
-                SHADOW_speaking = self._is_speaking
             if not SHADOW_speaking and not self.ui.muted and not self._phone_active:
                 loop.call_soon_threadsafe(
                     self.out_queue.put_nowait,

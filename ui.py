@@ -77,8 +77,8 @@ class C:
     RED       = "#ff3355"   # semantic: error
     MUTED_C   = "#ff3366"   # semantic: muted / warning
     TEXT      = "#ffffff"
-    TEXT_DIM  = "#8a7075"
-    TEXT_MED  = "#c9a8ad"
+    TEXT_DIM  = "#cccccc"   # was #8a7075 — raised to readable contrast on black
+    TEXT_MED  = "#eeeeee"   # was #c9a8ad — near-white for medium/secondary text
     WHITE     = "#ffffff"
     DARK      = "#000000"
     BAR_BG    = "#1a0008"
