@@ -40,13 +40,12 @@ def _blocked_roots() -> list[Path]:
 _BLOCKED_ROOTS = _blocked_roots()
 
 def _is_safe_path(target: Path) -> bool:
-    """Reject an entire drive/filesystem root and the OS-critical system
-    directory; everything else is allowed subject to real OS permissions."""
+    """Allow any path the Windows user can access, blocking only the OS-critical
+    system directories (C:\\Windows, /etc, etc.). Drive roots (C:\\, D:\\) and
+    all user-accessible paths are allowed — real OS permissions handle the rest."""
     try:
         resolved = target.resolve()
     except Exception:
-        return False
-    if resolved == Path(resolved.anchor):
         return False
     for root in _BLOCKED_ROOTS:
         try:
@@ -100,6 +99,14 @@ def _get_videos() -> Path:
     return Path.home() / "Videos"
 
 
+def _get_onedrive() -> Path | None:
+    onedrive = os.environ.get("ONEDRIVE", "")
+    if onedrive and Path(onedrive).exists():
+        return Path(onedrive)
+    candidate = Path.home() / "OneDrive"
+    return candidate if candidate.exists() else None
+
+
 def _resolve_path(raw: str) -> Path:
     shortcuts: dict[str, Path] = {
         "desktop":   _get_desktop(),
@@ -110,20 +117,31 @@ def _resolve_path(raw: str) -> Path:
         "videos":    _get_videos(),
         "home":      Path.home(),
     }
+    # Windows-specific shortcuts resolved from environment (not hard-coded usernames)
+    if _OS == "Windows":
+        onedrive = _get_onedrive()
+        if onedrive:
+            shortcuts["onedrive"] = onedrive
+        user_profile = os.environ.get("USERPROFILE", "")
+        if user_profile:
+            shortcuts["user profile"] = Path(user_profile)
+            shortcuts["userprofile"] = Path(user_profile)
+
     raw   = raw.strip().strip('"').strip("'")
     lower = raw.lower()
     if lower in shortcuts:
         return shortcuts[lower]
 
-    # "desktop/notlar/a.md" ve "desktop\notlar\a.md" — kisayol + alt yol.
-    # Bu dal olmadan tum dize asagidaki goreli-yol dalina dusuyor ve process'in
-    # CWD'sine gore cozuluyordu.  Proje home disindaysa _is_safe_path reddedip
-    # "Access denied" veriyor; home icindeyse daha kotusu oluyor ve dosya sessizce
-    # projenin icindeki olmayan bir "desktop" klasorune yaziliyordu.
+    # "desktop/notlar/a.md" and "desktop\notlar\a.md" — shortcut + sub-path.
     head, sep, rest = raw.replace("\\", "/").partition("/")
     if sep and head.lower() in shortcuts:
         rest = rest.strip("/")
         return shortcuts[head.lower()] / rest if rest else shortcuts[head.lower()]
+
+    # Windows drive root shorthand: "C:", "D:", "c:" → Path("C:\")
+    # (distinct from the "C:\" literal which Path() handles natively)
+    if _OS == "Windows" and len(raw) == 2 and raw[1] == ":" and raw[0].isalpha():
+        return Path(f"{raw[0].upper()}:\\")
 
     return Path(raw).expanduser()
 

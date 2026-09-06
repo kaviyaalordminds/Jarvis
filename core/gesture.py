@@ -62,42 +62,35 @@ class GestureConfig:
     # louder, so they need a higher bar to avoid matching ordinary noise;
     # snaps are quieter and need a lower one just to be seen at all, with
     # duration/spectral checks below doing the real discrimination work.
-    # These are physically-motivated starting points, not values measured
-    # against real recordings — widen/lower them via config if real snaps
-    # in your room aren't crossing the bar (see the [Gesture] diagnostic
-    # logs, which report the actual measured numbers on every rejection).
     clap_detection_threshold: float = 6.0
-    snap_detection_threshold: float = 3.2
-    min_absolute_rms: float = 200.0        # int16 RMS floor so near-silence doesn't cause false onsets
+    snap_detection_threshold: float = 2.5   # lower than clap — snaps are quieter; centroid/isolation do the real filtering
+    min_absolute_rms: float = 200.0         # int16 RMS floor so near-silence doesn't cause false onsets
 
     # Impulse shape — duration in ms, spectral centroid in Hz.
     clap_min_duration_ms: float = 15.0
     clap_max_duration_ms: float = 90.0
     clap_max_centroid_hz: float = 3500.0
-    snap_min_duration_ms: float = 2.0
+    snap_min_duration_ms: float = 1.5       # snaps can be very short (1-2ms physical event)
     snap_max_duration_ms: float = 45.0
-    snap_min_centroid_hz: float = 1800.0
+    snap_min_centroid_hz: float = 1500.0    # real snaps skew high-freq; 1500 Hz is a safe lower bound
     max_impulse_duration_ms: float = 150.0  # longer than this: not a clap/snap (speech, etc.) — discard
 
     # A real finger snap happens as an isolated event in an otherwise quiet
     # moment. Speech plosives (p/t/k/b) are acoustically similar short
     # broadband transients, but they arrive embedded in a stream of other
-    # nearby transients (the rest of the word/sentence) — so requiring some
-    # quiet time since the previous transient is a much stronger, physically
-    # grounded way to reject "speech that sounds snap-like" than tightening
-    # duration/centroid alone (verified: without this, plosive-heavy speech
-    # reliably produces false double-snaps; with it, none did in testing).
-    # Kept below double_snap_min_interval_ms so the second snap of a genuine
-    # fast double-snap is never rejected by this.
-    snap_min_isolation_ms: float = 120.0
+    # nearby transients (the rest of the word/sentence) — requiring quiet
+    # time since the previous transient is a physically-grounded way to
+    # reject speech while allowing a deliberate double-snap pair.
+    snap_min_isolation_ms: float = 80.0    # reduced to allow the second snap of a fast double-snap
 
-    # Adaptive noise floor: rises slowly and is capped, so a loud sustained
-    # passage (SHADOW talking, the user in conversation) can't drag the
-    # floor up to the point where a real clap/snap no longer clears the
-    # onset threshold — which is the likely cause of gestures working while
-    # SLEEPING (quiet room) but not while ACTIVE (mid-conversation).  It
-    # falls back down faster once things go quiet again.
-    noise_floor_ceiling: float = 3500.0
+    # Adaptive noise floor: the ceiling is deliberately kept low so a
+    # sustained loud passage (SHADOW TTS leaking from speakers into the mic)
+    # can't permanently raise the bar for clap/snap detection past the point
+    # where the user can realistically clap hard enough to cross it.
+    # set_speaking(True) additionally suspends upward floor updates during
+    # TTS playback so the floor returns to quiet-room levels as soon as
+    # SHADOW stops talking, rather than staying elevated.
+    noise_floor_ceiling: float = 1500.0    # was 3500 — lower ceiling keeps detection practical
 
     # Double-event timing, per gesture kind.
     double_clap_min_interval_ms: float = 120.0
@@ -136,6 +129,7 @@ class GestureDetector:
         self._buf = np.empty(0, dtype=np.int16)
         self._noise_floor = 600.0     # seed value; adapts quickly via EMA
         self._impulse: Optional[_PendingImpulse] = None
+        self._suppress_floor_up = False  # set True during TTS playback via set_speaking()
 
         self._pending_single: dict[GestureKind, float] = {}   # kind -> timestamp of unpaired event
         # -inf, not 0.0: time.monotonic() is an arbitrary, implementation-defined
@@ -148,6 +142,13 @@ class GestureDetector:
             self._log("Double clap detector disabled")
         if not self.cfg.enabled_snaps:
             self._log("Double snap detector disabled")
+
+    def set_speaking(self, is_speaking: bool) -> None:
+        """Freeze upward noise-floor updates while SHADOW is playing TTS.
+        Prevents SHADOW's own speaker audio (leaking into the mic) from
+        elevating the floor to the point where real claps/snaps can't clear
+        the onset threshold. The floor still falls normally once quiet."""
+        self._suppress_floor_up = is_speaking
 
     # ── public API ───────────────────────────────────────────────────────
 
@@ -186,11 +187,14 @@ class GestureDetector:
             # Idle: track noise floor — asymmetric (rises slowly, capped;
             # falls faster) so a sustained loud passage (conversation, TTS
             # playback) can't permanently drown out a real clap/snap.
-            if rms > self._noise_floor:
+            # When _suppress_floor_up is True (SHADOW speaking), only the
+            # downward update runs so the floor returns to quiet-room level
+            # as soon as TTS finishes, not after a slow EMA decay from the ceiling.
+            if rms > self._noise_floor and not self._suppress_floor_up:
                 self._noise_floor = min(
                     self.cfg.noise_floor_ceiling, 0.995 * self._noise_floor + 0.005 * rms
                 )
-            else:
+            elif rms <= self._noise_floor:
                 self._noise_floor = max(
                     self.cfg.min_absolute_rms * 0.3, 0.90 * self._noise_floor + 0.10 * rms
                 )
